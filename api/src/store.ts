@@ -237,8 +237,8 @@ export class Store {
               expiresAt,
             ],
           );
-          await replaceApps(c, code, input.apps);
-          await replaceOwners(c, code, input.owners, input.owner);
+          await replaceApps(c, code, input.apps, true);
+          await replaceOwners(c, code, input.owners, input.owner, true);
         });
         this.cache.delete(code);
         return code;
@@ -593,9 +593,11 @@ async function recount(c: Conn, code: string) {
   );
 }
 
-async function replaceApps(c: Conn, code: string, apps: AppDef[]) {
+async function replaceApps(c: Conn, code: string, apps: AppDef[], isNew = false) {
   const names = apps.map((a) => a.name);
-  if (names.length) await c.query('DELETE FROM apps WHERE room = ? AND name NOT IN (?)', [code, names]);
+  if (isNew) {
+    /* nothing to delete */
+  } else if (names.length) await c.query('DELETE FROM apps WHERE room = ? AND name NOT IN (?)', [code, names]);
   else await c.query('DELETE FROM apps WHERE room = ?', [code]);
   for (const a of apps) {
     await c.query(
@@ -617,8 +619,8 @@ async function replaceApps(c: Conn, code: string, apps: AppDef[]) {
   }
 }
 
-async function replaceOwners(c: Conn, code: string, owners: string[], primary: string) {
-  await c.query('DELETE FROM room_owners WHERE room = ?', [code]);
+async function replaceOwners(c: Conn, code: string, owners: string[], primary: string, isNew = false) {
+  if (!isNew) await c.query('DELETE FROM room_owners WHERE room = ?', [code]);
   const uniq = [...new Set(owners.filter((o) => o && o !== primary))];
   for (const o of uniq) await c.query('INSERT INTO room_owners (room, staff_id) VALUES (?, ?)', [code, o]);
 }

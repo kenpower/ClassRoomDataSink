@@ -3,7 +3,6 @@ import { normaliseCode, pickWeighted, randomRoomCode, CODE_RE } from '../../src/
 import { ipInCidrs, parseCidr } from '../../src/ip.js';
 import { MemoryLiveBus, type Subscriber } from '../../src/live.js';
 import { loadConfig } from '../../src/config.js';
-import { extractRoles } from '../../src/auth.js';
 
 describe('room codes', () => {
   it('uses the unambiguous alphabet', () => {
@@ -73,10 +72,5 @@ describe('config', () => {
     expect(() => loadConfig({ TOKEN_SECRET: 'short' })).toThrow(/TOKEN_SECRET/);
     expect(loadConfig({}).token.ephemeral).toBe(true);
     expect(loadConfig({ CORS_CLIENT_ORIGINS: 'https://a, https://b' }).cors.clientOrigins).toEqual(['https://a', 'https://b']);
-  });
-  it('extracts roles from nested claims or scope strings', () => {
-    expect(extractRoles({ realm_access: { roles: ['x', 'y'] } }, 'realm_access.roles')).toEqual(['x', 'y']);
-    expect(extractRoles({ scope: 'a b' }, 'scope')).toEqual(['a', 'b']);
-    expect(extractRoles({}, 'roles')).toEqual([]);
   });
 });

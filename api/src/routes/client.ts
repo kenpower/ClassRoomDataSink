@@ -56,7 +56,7 @@ export function clientRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   app.post('/api/v1/rooms/:code/join', { bodyLimit: 1024 }, async (req, reply) => {
-    limit(ctx, `join-ip:${req.ip}`, DEFAULT_LIMITS.ipJoinRate, DEFAULT_LIMITS.ipJoinRate * 3);
+    limit(ctx, `join-ip:${req.ip}`, DEFAULT_LIMITS.ipJoinRate, DEFAULT_LIMITS.ipJoinBurst);
     const room = await lookupRoom(req);
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((k) => k !== 'existingToken'))

@@ -63,12 +63,13 @@ export function readRoutes(app: FastifyInstance, ctx: Ctx) {
     const room = await readAccess(ctx, req);
     const q = req.query as ReadQuery;
     const s = await ctx.store.summary(room.code, parseApp(q));
+    const fresh = (await ctx.store.getRoom(room.code, { fresh: true })) ?? room;
     const clients = await ctx.store.clientCount(room.code);
     return {
       code: room.code,
-      status: room.status,
-      eventCount: room.eventCount,
-      bytesUsed: room.bytesUsed,
+      status: fresh.status,
+      eventCount: fresh.eventCount,
+      bytesUsed: fresh.bytesUsed,
       clients: clients.total - clients.deleted,
       deletedClients: clients.deleted,
       uniqueClients: s.uniqueClients,

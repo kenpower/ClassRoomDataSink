@@ -4,7 +4,6 @@ import websocket from '@fastify/websocket';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import type { JWTVerifyGetKey } from 'jose';
 import type { AppConfig } from './config.js';
 import { ApiError } from './errors.js';
 import { createPool, type Db } from './db.js';
@@ -19,13 +18,13 @@ import { RejectionStats, RoomStatsNotifier, limit, type Ctx } from './context.js
 import { clientRoutes } from './routes/client.js';
 import { adminRoutes } from './routes/admin.js';
 import { readRoutes } from './routes/read.js';
+import { authRoutes } from './routes/auth.js';
 import { runCleanup } from './cleanup.js';
 
 export interface BuildOptions {
   db?: Db;
   limiter?: RateLimitStore;
   live?: LiveBus;
-  jwksKeyGetter?: JWTVerifyGetKey;
   logger?: boolean;
   startCleanup?: boolean;
   memoryUsageMb?: () => number;
@@ -82,7 +81,7 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
     limiter: opts.limiter ?? new MemoryRateLimitStore(),
     live,
     metrics,
-    staffAuth: new StaffAuth(cfg.auth, opts.jwksKeyGetter),
+    staffAuth: new StaffAuth(cfg.auth, cfg.token.secret),
     schemas: new SchemaCache(),
     rejections: new RejectionStats(),
     roomStats,
@@ -189,6 +188,7 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
   });
 
   await app.register(async (scope) => {
+    authRoutes(scope, ctx);
     clientRoutes(scope, ctx);
     adminRoutes(scope, ctx);
     readRoutes(scope, ctx);

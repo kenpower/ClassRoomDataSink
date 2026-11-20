@@ -83,7 +83,7 @@ export const DEFAULT_LIMITS = {
   ipRate: 50,
   ipBurst: 300,
   ipJoinRate: 10,
-  ipJoinBurst: 30,
+  ipJoinBurst: 100,
   roomJoinsPerHour: 600,
   failedCodesPerMin: 10,
   failedCodeBlockMs: 10 * 60 * 1000,

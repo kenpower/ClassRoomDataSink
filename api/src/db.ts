@@ -26,23 +26,32 @@ export function createPool(cfg: AppConfig['db']): Pool {
   });
 }
 
-/** Run fn in a transaction, committing on success and rolling back on any throw. */
-export async function tx<T>(pool: Pool, fn: (c: PoolConnection) => Promise<T>): Promise<T> {
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const result = await fn(conn);
-    await conn.commit();
-    return result;
-  } catch (err) {
+/**
+ * Run fn in a transaction, committing on success and rolling back on any throw.
+ * Deadlocks and lock-wait timeouts are retried (with jitter) up to `retries` times, as MySQL recommends.
+ */
+export async function tx<T>(pool: Pool, fn: (c: PoolConnection) => Promise<T>, retries = 3): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const conn = await pool.getConnection();
     try {
-      await conn.rollback();
-    } catch {
-      /* connection may be dead */
+      await conn.beginTransaction();
+      const result = await fn(conn);
+      await conn.commit();
+      return result;
+    } catch (err) {
+      try {
+        await conn.rollback();
+      } catch {
+        /* connection may be dead */
+      }
+      if (attempt < retries && isDeadlock(err)) {
+        await new Promise((r) => setTimeout(r, 5 + Math.random() * 20 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    } finally {
+      conn.release();
     }
-    throw err;
-  } finally {
-    conn.release();
   }
 }
 

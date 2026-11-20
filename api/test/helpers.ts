@@ -1,30 +1,11 @@
 import { inject } from 'vitest';
-import { exportJWK, generateKeyPair, SignJWT, createLocalJWKSet, type JWTVerifyGetKey } from 'jose';
 import mysql from 'mysql2/promise';
 import { loadConfig } from '../src/config.js';
 import { migrate } from '../src/migrate.js';
 import { buildApp, type BuildOptions } from '../src/app.js';
 import { createPool } from '../src/db.js';
 
-export const ISSUER = 'https://idp.test';
-export const AUDIENCE = 'roomsink';
-
-export async function makeIdp() {
-  const { privateKey, publicKey } = await generateKeyPair('RS256');
-  const jwk = { ...(await exportJWK(publicKey)), kid: 'test', alg: 'RS256' };
-  const keyGetter: JWTVerifyGetKey = createLocalJWKSet({ keys: [jwk] });
-  const sign = (sub: string, roles: string[] = ['roomsink-staff'], opts: { exp?: string; iss?: string; aud?: string } = {}) =>
-    new SignJWT({ roles })
-      .setProtectedHeader({ alg: 'RS256', kid: 'test' })
-      .setSubject(sub)
-      .setIssuer(opts.iss ?? ISSUER)
-      .setAudience(opts.aud ?? AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime(opts.exp ?? '10m')
-      .sign(privateKey);
-  return { keyGetter, sign };
-}
-
+export const STARS_SECRET = 'stars-test-secret-stars-test-secret-0123';
 export function testConfig(extra: Record<string, string> = {}) {
   const db = inject('db');
   return loadConfig({
@@ -35,11 +16,14 @@ export function testConfig(extra: Record<string, string> = {}) {
     DB_PASSWORD: db.password,
     DB_NAME: db.database,
     TOKEN_SECRET: 'test-secret-test-secret-test-secret-0123456789',
-    AUTH_ISSUER: ISSUER,
-    AUTH_AUDIENCE: AUDIENCE,
+    AUTH_JWT_SECRET: STARS_SECRET,
+    STAFF_EMAIL_DOMAINS: 'setu.ie',
+    ADMIN_EMAILS: 'admin@gmail.com',
+    PUBLIC_API_URL: 'https://roomsink.example',
+    ADMIN_URL: 'https://admin.example/admin/',
     CORS_CLIENT_ORIGINS: 'https://apps.example',
     ADMIN_ORIGIN: 'https://admin.example',
-    LOG_LEVEL: 'silent',
+    LOG_LEVEL: process.env.TEST_LOG ? 'error' : 'silent',
     ...extra,
   });
 }
@@ -51,15 +35,15 @@ export async function setupApp(opts: BuildOptions & { env?: Record<string, strin
     await migrate(cfg.db);
     migrated = true;
   }
-  const idp = await makeIdp();
   const db = createPool(cfg.db);
-  const built = await buildApp(cfg, { logger: false, jwksKeyGetter: idp.keyGetter, db, ...opts });
+  const built = await buildApp(cfg, { logger: !!process.env.TEST_LOG, db, ...opts });
   await built.app.ready();
-  const staffToken = await idp.sign('staff-1');
+  const session = (sub: string, isAdmin = false) => built.ctx.staffAuth.issueSession({ sub, name: sub, isAdmin }).then((s) => s.token);
+  const staffToken = await session('staff-1@setu.ie');
   return {
     ...built,
     db,
-    idp,
+    session,
     staffToken,
     async close() {
       await built.close();
@@ -107,3 +91,12 @@ export async function rawConn() {
   const db = inject('db');
   return mysql.createConnection({ ...db, timezone: 'Z' });
 }
+
+/** A limiter that never limits, for tests that are about data rather than abuse. */
+export const unlimited = {
+  take: () => ({ ok: true, retryAfter: 0 }),
+  block: () => {},
+  blockedFor: () => 0,
+  sweep: () => {},
+  size: () => 0,
+};
