@@ -1,0 +1,59 @@
+# Example for a DMZ / host nginx terminating TLS in front of the stack.
+# Point it at the compose `proxy` service (published on 127.0.0.1:8080 by default),
+# or copy the location blocks from proxy.conf and proxy straight to api:3000 / admin:8080.
+# Set TRUST_PROXY_CIDRS to this nginx's address so the API reads X-Forwarded-For.
+
+server {
+    listen 80;
+    server_name roomsink.example.ie;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name roomsink.example.ie;
+    server_tokens off;
+
+    ssl_certificate     /etc/ssl/roomsink/fullchain.pem;
+    ssl_certificate_key /etc/ssl/roomsink/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+    client_max_body_size 64k;
+    client_body_timeout 10s;
+
+    # Optional: restrict staff/admin routes to campus/VPN ranges (students' phones still work from anywhere).
+    # location /api/v1/admin/ { allow 10.0.0.0/8; deny all; proxy_pass http://127.0.0.1:8080; }
+
+    location ~ ^/api/v1/rooms/[^/]+/live$ {
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 1h;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
+    location ~ ^/api/v1/rooms/[^/]+/events$ {
+        client_max_body_size 8k;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
+    location / {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:8080;
+    }
+}

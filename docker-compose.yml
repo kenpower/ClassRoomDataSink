@@ -1,0 +1,130 @@
+# RoomSink stack. `docker compose up -d --build` works from a clean checkout (dev defaults);
+# for production copy .env.example to .env and set real secrets.
+name: roomsink
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  db:
+    <<: *hardening
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    user: "999:999"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-roomsink-dev-root}
+      MYSQL_DATABASE: ${DB_NAME:-roomsink}
+      # Migration user: DDL on the roomsink database only.
+      MYSQL_USER: ${DB_MIGRATE_USER:-roomsink_migrate}
+      MYSQL_PASSWORD: ${DB_MIGRATE_PASSWORD:-roomsink-dev-migrate}
+      # Runtime user created by deploy/mysql/01-app-user.sh: DML only.
+      DB_APP_USER: ${DB_USER:-roomsink}
+      DB_APP_PASSWORD: ${DB_PASSWORD:-roomsink-dev-app}
+    command: ["--innodb-buffer-pool-size=256M", "--max-connections=200", "--skip-name-resolve"]
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./deploy/mysql/01-app-user.sh:/docker-entrypoint-initdb.d/01-app-user.sh:ro
+    tmpfs:
+      - /tmp
+      - /var/run/mysqld
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1g }
+
+  api:
+    <<: *hardening
+    build: { context: ., dockerfile: api/Dockerfile }
+    image: roomsink-api:local
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-roomsink}
+      DB_USER: ${DB_USER:-roomsink}
+      DB_PASSWORD: ${DB_PASSWORD:-roomsink-dev-app}
+      DB_MIGRATE_USER: ${DB_MIGRATE_USER:-roomsink_migrate}
+      DB_MIGRATE_PASSWORD: ${DB_MIGRATE_PASSWORD:-roomsink-dev-migrate}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      TOKEN_SECRET: ${TOKEN_SECRET:-}
+      TOKEN_KID: ${TOKEN_KID:-k1}
+      AUTH_BASE_URL: ${AUTH_BASE_URL:-https://compucore2.setu.ie/auth}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+      AUTH_PROVIDERS: ${AUTH_PROVIDERS:-microsoft,google}
+      STAFF_EMAIL_DOMAINS: ${STAFF_EMAIL_DOMAINS:-}
+      STAFF_EMAILS: ${STAFF_EMAILS:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      AUTH_TOKEN_MAX_AGE_S: ${AUTH_TOKEN_MAX_AGE_S:-0}
+      SESSION_HOURS: ${SESSION_HOURS:-8}
+      SESSION_MAX_HOURS: ${SESSION_MAX_HOURS:-12}
+      PUBLIC_API_URL: ${PUBLIC_URL:-http://localhost:8080}
+      ADMIN_URL: ${PUBLIC_URL:-http://localhost:8080}/admin/
+      ADMIN_ORIGIN: ${ADMIN_ORIGIN:-}
+      CORS_CLIENT_ORIGINS: ${CORS_CLIENT_ORIGINS:-*}
+      IP_ALLOWLIST: ${IP_ALLOWLIST:-}
+      # The proxy container (and docker networks) may set X-Forwarded-For.
+      TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+      MEMORY_LIMIT_MB: 400
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    tmpfs: [/tmp]
+    networks: [public, internal]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  admin:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: admin/Dockerfile
+      args:
+        PUBLIC_API_URL: ${ADMIN_API_URL:-}
+        PUBLIC_CLIENT_URL: ${CLIENT_URL:-}
+    image: roomsink-admin:local
+    tmpfs: [/tmp]
+    networks: [public]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64m }
+
+  # Optional: leave out (e.g. `docker compose up db api admin`) if the DMZ already has nginx,
+  # and publish api/admin to the host instead.
+  proxy:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e
+    depends_on: [api, admin]
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./deploy/nginx/proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    tmpfs: [/tmp]
+    networks: [public]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/admin/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 128m }
+
+networks:
+  public: {}
+  internal:
+    internal: true
+
+volumes:
+  db-data: {}

@@ -1,0 +1,33 @@
+{
+  "name": "@roomsink/admin",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "gen:api": "openapi-typescript ../api/openapi.yaml --default-non-nullable false -o src/lib/api-types.ts",
+    "check:api": "openapi-typescript ../api/openapi.yaml --default-non-nullable false -o /tmp/roomsink-api-types.ts && diff -q /tmp/roomsink-api-types.ts src/lib/api-types.ts",
+    "dev": "vite dev",
+    "build": "vite build && node scripts/externalize-inline.mjs",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "lint": "npm run check && npm run check:api",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@sveltejs/adapter-static": "^3.0.11",
+    "@sveltejs/kit": "^2.70.4",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@types/qrcode": "^1.5.6",
+    "jose": "^6.2.18",
+    "mysql2": "^3.24.6",
+    "openapi-typescript": "^7.13.0",
+    "svelte": "^5.58.1",
+    "svelte-check": "^4.7.8",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.8"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

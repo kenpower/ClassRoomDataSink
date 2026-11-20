@@ -1,0 +1,635 @@
+openapi: 3.1.0
+info:
+  title: RoomSink API
+  version: 1.0.0
+  description: |
+    Ephemeral, schemaless event sink for in-class experiments. Anonymous phone web apps send JSON events
+    to a room code; staff sign in (via the STARS auth service) to create rooms and read the data.
+    All data deletes itself automatically. There are no backups by design.
+
+    Errors always look like `{"error": {"code", "message", "retryAfter?"}}`. Every 429 and 503 has a `Retry-After` header.
+servers:
+  - url: /
+tags:
+  - name: client
+    description: Anonymous phone clients (join token)
+  - name: staff
+    description: Staff (session token from /auth)
+  - name: read
+    description: Staff session or presenter key
+  - name: auth
+  - name: ops
+
+components:
+  securitySchemes:
+    joinToken:
+      type: http
+      scheme: bearer
+      description: HMAC-SHA256 join token from POST /rooms/{code}/join
+    staffSession:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: RoomSink staff session token from POST /api/v1/auth/session
+    presenterKey:
+      type: apiKey
+      in: header
+      name: X-Presenter-Key
+  parameters:
+    code:
+      name: code
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$' }
+    app:
+      name: app
+      in: query
+      schema: { $ref: '#/components/schemas/AppName' }
+    since:
+      name: since
+      in: query
+      description: Return events with seq greater than this
+      schema: { type: integer, minimum: 0 }
+  responses:
+    Error:
+      description: Error
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [ROOM_NOT_FOUND, ROOM_CLOSED, APP_DISABLED, RATE_LIMITED, CAP_REACHED, INVALID_PAYLOAD, SCHEMA_FAILED,
+                TOKEN_INVALID, CLIENT_DELETED, UNAUTHORISED, FORBIDDEN, NOT_FOUND, CONFLICT, UNAVAILABLE, INTERNAL]
+            message: { type: string }
+            retryAfter: { type: integer }
+    AppName:
+      type: string
+      pattern: '^[a-z0-9-]{1,40}$'
+    RoomStatus:
+      type: string
+      enum: [draft, open, closed]
+    Groups:
+      description: Weighted A/B groups, e.g. {"A":1,"B":1}
+      type: [object, 'null']
+      additionalProperties: { type: number, minimum: 0 }
+    App:
+      type: object
+      required: [name, enabled, maxEventsPerClient, allowFreeText, groups, config, schema]
+      properties:
+        name: { $ref: '#/components/schemas/AppName' }
+        enabled: { type: boolean }
+        maxEventsPerClient: { type: integer, minimum: 1, maximum: 50000 }
+        allowFreeText: { type: boolean, description: 'Strings up to 200 chars instead of 40' }
+        groups: { $ref: '#/components/schemas/Groups' }
+        config: { type: object, description: 'At most 4 KB', additionalProperties: true }
+        schema: { description: 'Optional JSON Schema (Ajv strict) for data', type: [object, boolean, 'null'] }
+    AppInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { $ref: '#/components/schemas/AppName' }
+        enabled: { type: boolean, default: true }
+        maxEventsPerClient: { type: integer, default: 100 }
+        allowFreeText: { type: boolean, default: false }
+        groups: { $ref: '#/components/schemas/Groups' }
+        config: { type: object, additionalProperties: true }
+        schema: { type: [object, boolean, 'null'] }
+    Limits:
+      type: object
+      additionalProperties: false
+      properties:
+        maxEvents: { type: integer, maximum: 50000 }
+        maxClients: { type: integer, maximum: 1000 }
+        maxBytes: { type: integer, maximum: 20971520 }
+        writesPerSecond: { type: number, maximum: 100 }
+        clientWritesPerSecond: { type: number }
+        clientWriteBurst: { type: integer }
+        joinsPerHour: { type: integer }
+        openMinutes: { type: integer, description: 'Default 180' }
+        retainHours: { type: integer, description: 'Default 24' }
+    Room:
+      type: object
+      required: [code, title, owner, owners, status, purpose, publicConfig, limits, hasPresenterKey, eventCount, bytesUsed, createdAt, closesAt, expiresAt, apps]
+      properties:
+        code: { type: string }
+        title: { type: string }
+        owner: { type: string }
+        owners: { type: array, items: { type: string } }
+        status: { $ref: '#/components/schemas/RoomStatus' }
+        purpose: { type: string, enum: [teaching, research] }
+        publicConfig: { type: object, additionalProperties: true }
+        limits: { $ref: '#/components/schemas/Limits' }
+        hasPresenterKey: { type: boolean }
+        eventCount: { type: integer }
+        bytesUsed: { type: integer }
+        createdAt: { type: string, format: date-time }
+        closesAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        apps: { type: array, items: { $ref: '#/components/schemas/App' } }
+        clientCount: { type: integer }
+        deletedClients: { type: integer }
+        rejections: { type: object, additionalProperties: { type: integer } }
+    RoomSummary:
+      type: object
+      required: [code, title, owner, status, purpose, eventCount, bytesUsed, clientCount, createdAt, closesAt, expiresAt]
+      properties:
+        code: { type: string }
+        title: { type: string }
+        owner: { type: string }
+        status: { $ref: '#/components/schemas/RoomStatus' }
+        purpose: { type: string, enum: [teaching, research] }
+        eventCount: { type: integer }
+        bytesUsed: { type: integer }
+        clientCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        closesAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    RoomInput:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 100 }
+        purpose: { type: string, enum: [teaching, research] }
+        publicConfig: { type: object, description: 'At most 8 KB', additionalProperties: true }
+        limits: { $ref: '#/components/schemas/Limits' }
+        closesAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, description: 'At most 30 days away' }
+        apps: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/AppInput' } }
+        owners: { type: array, description: 'Co-owner staff ids (emails)', items: { type: string } }
+    CreateRoomInput:
+      allOf:
+        - $ref: '#/components/schemas/RoomInput'
+        - type: object
+          required: [title]
+          properties:
+            open: { type: boolean, default: false }
+            presenterKey: { type: boolean, default: true }
+    CreatedRoom:
+      type: object
+      required: [code, presenterKey, room]
+      properties:
+        code: { type: string }
+        presenterKey: { type: [string, 'null'], description: 'Shown only once' }
+        room: { $ref: '#/components/schemas/Room' }
+    PublicConfig:
+      type: object
+      required: [code, title, status, closesAt, apps, publicConfig]
+      properties:
+        code: { type: string }
+        title: { type: string }
+        status: { $ref: '#/components/schemas/RoomStatus' }
+        closesAt: { type: string, format: date-time }
+        apps:
+          type: array
+          items:
+            type: object
+            required: [name, config]
+            properties:
+              name: { type: string }
+              config: { type: object, additionalProperties: true }
+        publicConfig: { type: object, additionalProperties: true }
+    EventInput:
+      type: object
+      required: [app, data]
+      additionalProperties: false
+      properties:
+        app: { $ref: '#/components/schemas/AppName' }
+        data:
+          description: 'Any JSON: depth ≤ 4, ≤ 50 keys/items, keys ^[A-Za-z0-9_]{1,40}$, strings ≤ 40 chars (≤ 200 with allowFreeText)'
+        clientT: { type: integer, description: 'Client clock, ms since epoch' }
+        appVersion: { type: string, maxLength: 20 }
+    Event:
+      type: object
+      required: [id, seq, app, cid, group, t, clientT, appVersion, data]
+      properties:
+        id: { type: string, description: ULID }
+        seq: { type: integer }
+        app: { type: string }
+        cid: { type: string }
+        group: { type: [string, 'null'] }
+        t: { type: string, format: date-time }
+        clientT: { type: [integer, 'null'] }
+        appVersion: { type: [string, 'null'] }
+        data: {}
+    JoinResult:
+      type: object
+      required: [token, cid, groups, expiresAt]
+      properties:
+        token: { type: string }
+        cid: { type: string }
+        groups: { type: object, additionalProperties: { type: string } }
+        expiresAt: { type: string, format: date-time }
+    Session:
+      type: object
+      required: [token, expiresAt, user]
+      properties:
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+        user: { $ref: '#/components/schemas/User' }
+    User:
+      type: object
+      required: [id, name, isAdmin]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        isAdmin: { type: boolean }
+    Summary:
+      type: object
+      required: [code, status, eventCount, bytesUsed, clients, deletedClients, uniqueClients, apps, rejections]
+      properties:
+        code: { type: string }
+        status: { $ref: '#/components/schemas/RoomStatus' }
+        eventCount: { type: integer }
+        bytesUsed: { type: integer }
+        clients: { type: integer }
+        deletedClients: { type: integer }
+        uniqueClients: { type: integer }
+        apps:
+          type: object
+          additionalProperties:
+            type: object
+            required: [events, clients, groups]
+            properties:
+              events: { type: integer }
+              clients: { type: integer }
+              groups:
+                type: object
+                additionalProperties:
+                  type: object
+                  required: [events, clients]
+                  properties:
+                    events: { type: integer }
+                    clients: { type: integer }
+        rejections: { type: object, additionalProperties: { type: integer } }
+    LiveMessage:
+      description: WebSocket messages on /rooms/{code}/live
+      oneOf:
+        - type: object
+          required: [type, events]
+          properties:
+            type: { const: events }
+            backlog: { type: boolean }
+            events: { type: array, items: { $ref: '#/components/schemas/Event' } }
+        - type: object
+          required: [type]
+          properties:
+            type: { const: deleted }
+            cid: { type: string }
+            app: { type: string }
+            all: { type: boolean }
+        - type: object
+          required: [type, room]
+          properties:
+            type: { const: room }
+            room:
+              type: object
+              properties:
+                code: { type: string }
+                status: { $ref: '#/components/schemas/RoomStatus' }
+                closesAt: { type: string }
+                expiresAt: { type: string }
+                eventCount: { type: integer }
+                bytesUsed: { type: integer }
+                clients: { type: integer }
+                deletedClients: { type: integer }
+                apps: { type: array, items: { type: object, properties: { name: { type: string }, enabled: { type: boolean } } } }
+                rejections: { type: object, additionalProperties: { type: integer } }
+        - type: object
+          required: [type, t]
+          properties:
+            type: { const: ping }
+            t: { type: integer }
+
+paths:
+  /api/v1/rooms/{code}/config:
+    get:
+      tags: [client]
+      summary: Public room config (cached 5 s). Unknown and expired rooms both return 404.
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicConfig' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/join:
+    post:
+      tags: [client]
+      summary: Join an open room. Reuses a valid existing token.
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                existingToken: { type: string }
+      responses:
+        '200': { description: Existing token reused, content: { application/json: { schema: { $ref: '#/components/schemas/JoinResult' } } } }
+        '201': { description: Joined, content: { application/json: { schema: { $ref: '#/components/schemas/JoinResult' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/events:
+    post:
+      tags: [client]
+      summary: Send one event (≤ 2 KB) or a batch of up to 20 (≤ 8 KB)
+      security: [{ joinToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/code' }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Deduplicated for 10 minutes per client
+          schema: { type: string, pattern: '^[A-Za-z0-9_.:-]{1,64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/EventInput'
+                - type: object
+                  required: [events]
+                  additionalProperties: false
+                  properties:
+                    events: { type: array, minItems: 1, maxItems: 20, items: { $ref: '#/components/schemas/EventInput' } }
+      responses:
+        '202':
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, seq]
+                properties:
+                  id: { type: string }
+                  seq: { type: [integer, 'null'] }
+                  ids: { type: array, items: { type: string } }
+                  seqs: { type: array, items: { type: integer } }
+                  duplicate: { type: boolean }
+        default: { $ref: '#/components/responses/Error' }
+    get:
+      tags: [read]
+      summary: Read events, paged by seq
+      security: [{ staffSession: [] }, { presenterKey: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/code' }
+        - { $ref: '#/components/parameters/app' }
+        - { $ref: '#/components/parameters/since' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, nextSince, more]
+                properties:
+                  events: { type: array, items: { $ref: '#/components/schemas/Event' } }
+                  nextSince: { type: integer }
+                  more: { type: boolean }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/me:
+    get:
+      tags: [client]
+      summary: This client's own events
+      security: [{ joinToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cid: { type: string }
+                  deleted: { type: boolean }
+                  groups: { type: object, additionalProperties: { type: string } }
+                  events: { type: array, items: { type: object } }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [client]
+      summary: Hard-delete this client's events and mark the cid deleted. Works after the room closes.
+      security: [{ joinToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200': { description: Deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: integer } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/summary:
+    get:
+      tags: [read]
+      summary: Counts per app and group, plus unique clients and rejection stats
+      security: [{ staffSession: [] }, { presenterKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }, { $ref: '#/components/parameters/app' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Summary' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/export:
+    get:
+      tags: [read]
+      summary: Streamed export. CSV cells starting with = + - @ tab or CR are prefixed with '.
+      security: [{ staffSession: [] }, { presenterKey: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/code' }
+        - { $ref: '#/components/parameters/app' }
+        - { name: format, in: query, schema: { type: string, enum: [csv, json], default: csv } }
+      responses:
+        '200':
+          description: File download
+          content:
+            text/csv: { schema: { type: string } }
+            application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Event' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/live-ticket:
+    post:
+      tags: [read]
+      summary: Single-use WebSocket ticket, valid for 30 seconds
+      security: [{ staffSession: [] }, { presenterKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, required: [ticket, expiresIn], properties: { ticket: { type: string }, expiresIn: { type: integer } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/rooms/{code}/live:
+    get:
+      tags: [read]
+      summary: 'WebSocket: messages are events (batched every 250 ms), deleted, room and ping. See LiveMessage.'
+      parameters:
+        - { $ref: '#/components/parameters/code' }
+        - { name: ticket, in: query, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/app' }
+        - { $ref: '#/components/parameters/since' }
+      responses:
+        '101': { description: Switching protocols }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/admin/rooms:
+    get:
+      tags: [staff]
+      summary: List my rooms (?all=1 for admins)
+      security: [{ staffSession: [] }]
+      parameters: [{ name: all, in: query, schema: { type: string, enum: ['1'] } }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, required: [rooms], properties: { rooms: { type: array, items: { $ref: '#/components/schemas/RoomSummary' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [staff]
+      summary: Create a room. The presenter key is returned only this once.
+      security: [{ staffSession: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateRoomInput' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/CreatedRoom' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}:
+    parameters: [{ $ref: '#/components/parameters/code' }]
+    get:
+      tags: [staff]
+      security: [{ staffSession: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Room' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [staff]
+      summary: Update a room. `apps` and `owners` replace the whole list.
+      security: [{ staffSession: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RoomInput' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Room' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [staff]
+      summary: Delete all data and retire the code for 30 days
+      security: [{ staffSession: [] }]
+      responses:
+        '204': { description: Deleted }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}/open:
+    post:
+      tags: [staff]
+      summary: Open the room. Drafts get a fresh window (default 3 h) unless closesAt is given.
+      security: [{ staffSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, additionalProperties: false, properties: { closesAt: { type: string, format: date-time } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Room' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}/close:
+    post:
+      tags: [staff]
+      summary: Close now; data expires retainHours (default 24) later
+      security: [{ staffSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Room' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}/rotate-key:
+    post:
+      tags: [staff]
+      security: [{ staffSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      responses:
+        '200':
+          description: New presenter key (shown once)
+          content: { application/json: { schema: { type: object, required: [code, presenterKey], properties: { code: { type: string }, presenterKey: { type: string } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}/clone:
+    post:
+      tags: [staff]
+      summary: Copy settings and apps into a new draft room (no data)
+      security: [{ staffSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, additionalProperties: false, properties: { title: { type: string } } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/CreatedRoom' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/admin/rooms/{code}/events:
+    delete:
+      tags: [staff]
+      summary: Clear data for one app (?app=) or the whole room
+      security: [{ staffSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/code' }, { $ref: '#/components/parameters/app' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, required: [deleted], properties: { deleted: { type: integer } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+
+  /api/v1/auth/login:
+    get:
+      tags: [auth]
+      summary: Redirects the browser to STARS sign-in
+      parameters: [{ name: return, in: query, schema: { type: string, description: 'Path under /admin/ to return to' } }]
+      responses:
+        '302': { description: 'Redirect to {AUTH_BASE_URL}/sign_in' }
+  /api/v1/auth/callback:
+    get:
+      tags: [auth]
+      summary: STARS redirect target. Verifies the HS256 token and redirects to {ADMIN_URL}auth#code=… (or #error=…).
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+        - { name: origin_url, in: query, schema: { type: string } }
+      responses:
+        '302': { description: Redirect to the admin SPA }
+  /api/v1/auth/session:
+    post:
+      tags: [auth]
+      summary: Exchange the one-time code (60 s) for a session token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Silent renewal, up to SESSION_MAX_HOURS after sign-in
+      security: [{ staffSession: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      security: [{ staffSession: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /api/v1/auth/logout:
+    get:
+      tags: [auth]
+      summary: Redirects to STARS logout, which returns to the admin
+      responses:
+        '302': { description: Redirect }
+
+  /healthz:
+    get: { tags: [ops], summary: Liveness, responses: { '200': { description: OK } } }
+  /readyz:
+    get: { tags: [ops], summary: Database reachable, responses: { '200': { description: OK }, '503': { description: Not ready } } }
+  /metrics:
+    get: { tags: [ops], summary: Prometheus metrics (internal network only), responses: { '200': { description: OK, content: { text/plain: { schema: { type: string } } } } } }
+  /sdk/roomsink.js:
+    get: { tags: [ops], summary: Client SDK (ES module), responses: { '200': { description: OK, content: { text/javascript: { schema: { type: string } } } } } }
