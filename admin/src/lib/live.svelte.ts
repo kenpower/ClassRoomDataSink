@@ -69,7 +69,7 @@ export class LiveRoom {
       if (!fresh.length) return;
       this.lastSeq = fresh[fresh.length - 1]!.seq;
       this.recent = [...fresh.reverse(), ...this.recent].slice(0, this.keep);
-      if (this.room && !msg.backlog) this.room = { ...this.room, eventCount: (this.room.eventCount ?? 0) + fresh.length };
+      // Counters come from the server's `room` messages (sent within ~1 s of a change), not local arithmetic.
     } else if (msg.type === 'deleted') {
       if (msg.all) this.recent = [];
       else if (msg.app) this.recent = this.recent.filter((e) => e.app !== msg.app);

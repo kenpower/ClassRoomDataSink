@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RoomSink quiz example</title>
+  <style>
+    body { font: 18px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+    button { font: inherit; padding: .6em 1.2em; margin: .25em; border-radius: 8px; }
+    .muted { color: #555; }
+  </style>
+</head>
+<body>
+  <!-- Open as  example.html?r=ROOMCODE  (the room needs an app named "quiz"). -->
+  <h1 id="title">Joining…</h1>
+  <p id="status" class="muted" aria-live="polite"></p>
+  <div id="answers" hidden>
+    <p>Which answer is correct?</p>
+    <button type="button" data-a="A">A</button><button type="button" data-a="B">B</button>
+    <button type="button" data-a="C">C</button><button type="button" data-a="D">D</button>
+  </div>
+  <hr />
+  <roomsink-privacy></roomsink-privacy>
+
+  <script type="module">
+    // Change to your RoomSink host, e.g. https://roomsink.example.ie
+    const API = new URL(document.currentScript?.src ?? location.href).origin;
+    const { RoomSink } = await import(`${API}/sdk/roomsink.js`);
+    const $ = (id) => document.getElementById(id);
+    try {
+      const rs = await RoomSink.connect({ api: API });
+      $('title').textContent = rs.config.title;
+      $('answers').hidden = false;
+      $('status').textContent = `You are in group ${rs.group('quiz') ?? '–'}.`;
+      rs.onStatus((s) => {
+        if (s !== 'open') {
+          $('answers').hidden = true;
+          $('status').textContent = 'This activity is closed. Thank you!';
+        }
+      });
+      for (const b of document.querySelectorAll('[data-a]')) {
+        b.addEventListener('click', async () => {
+          $('status').textContent = 'Sending…';
+          try {
+            await rs.send('quiz', { answer: b.dataset.a });
+            $('status').textContent = `Sent ${b.dataset.a}.`;
+          } catch (e) {
+            $('status').textContent = `Not sent: ${e.message}`;
+          }
+        });
+      }
+    } catch (e) {
+      $('title').textContent = 'Could not join';
+      $('status').textContent = e.message;
+    }
+  </script>
+</body>
+</html>

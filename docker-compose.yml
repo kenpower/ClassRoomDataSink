@@ -77,6 +77,8 @@ services:
       IP_ALLOWLIST: ${IP_ALLOWLIST:-}
       # The proxy container (and docker networks) may set X-Forwarded-For.
       TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+      IP_RATE_PER_SEC: ${IP_RATE_PER_SEC:-50}
+      IP_RATE_BURST: ${IP_RATE_BURST:-300}
       MEMORY_LIMIT_MB: 400
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs: [/tmp]

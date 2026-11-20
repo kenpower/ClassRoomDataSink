@@ -14,7 +14,7 @@ describe('token bucket', () => {
     expect(s.take('cid', 2, 20).ok).toBe(false);
   });
   it('computes Retry-After for slow buckets', () => {
-    let now = 0;
+    const now = 0;
     const s = new MemoryRateLimitStore(() => now);
     for (let i = 0; i < 10; i++) s.take('fail', 10 / 60, 10);
     const r = s.take('fail', 10 / 60, 10);

@@ -53,6 +53,9 @@ test('create a room and watch live counters update', async ({ page, request }) =
 
   await expect(page.getByTestId('clients')).toHaveText('1', { timeout: 5000 });
   await expect(page.getByTestId('events')).toHaveText('2', { timeout: 5000 });
+  // Stays correct once further room updates arrive (guards against double counting).
+  await page.waitForTimeout(1500);
+  await expect(page.getByTestId('events')).toHaveText('2');
   // Payload shown as text, never as HTML.
   await expect(page.getByRole('cell', { name: /<img src=x onerror=alert\(1\)>/ })).toBeVisible();
   expect(await page.locator('td img').count()).toBe(0);

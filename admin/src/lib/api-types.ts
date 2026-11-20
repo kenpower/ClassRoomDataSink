@@ -1211,6 +1211,7 @@ export interface components {
             maxEvents?: number;
             maxClients?: number;
             maxBytes?: number;
+            /** @description Default 100 */
             writesPerSecond?: number;
             clientWritesPerSecond?: number;
             clientWriteBurst?: number;

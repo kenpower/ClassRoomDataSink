@@ -273,6 +273,7 @@
   .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
   .cols h2 { margin-top: 0; }
   #client-url { width: 100%; }
+  #client-url + .hint { margin-top: 0.4rem; }
   .url { word-break: break-all; }
   .apps { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; gap: 0.4rem; }
   .switch { display: inline-flex; gap: 0.5rem; align-items: center; font-weight: 400; margin: 0; }

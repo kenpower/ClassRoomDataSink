@@ -8,7 +8,7 @@ import type { AppConfig } from './config.js';
 import { ApiError } from './errors.js';
 import { createPool, type Db } from './db.js';
 import { Store } from './store.js';
-import { MemoryRateLimitStore, DEFAULT_LIMITS, type RateLimitStore } from './ratelimit.js';
+import { MemoryRateLimitStore, type RateLimitStore } from './ratelimit.js';
 import { MemoryLiveBus, type LiveBus } from './live.js';
 import { Metrics } from './metrics.js';
 import { StaffAuth } from './auth.js';
@@ -74,8 +74,8 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
   const store = new Store(db);
   const live = opts.live ?? new MemoryLiveBus();
   const metrics = new Metrics();
-  let ctxRef!: Ctx;
-  const roomStats = new RoomStatsNotifier(() => ctxRef);
+  // The notifier only calls back after construction, so referencing `ctx` here is safe.
+  const roomStats = new RoomStatsNotifier(() => ctx);
   const ctx: Ctx = {
     cfg,
     store,
@@ -88,7 +88,6 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
     roomStats,
     memoryUsageMb: opts.memoryUsageMb ?? (() => process.memoryUsage().rss / (1024 * 1024)),
   };
-  ctxRef = ctx;
   metrics.gauge('roomsink_ws_connections', 'Open live WebSocket connections', () => live.connectionCount());
   metrics.gauge('roomsink_ratelimit_keys', 'Rate-limit buckets in memory', () => ctx.limiter.size());
 
@@ -129,7 +128,7 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
     if (allow.length && !ipInCidrs(req.ip, allow)) throw new ApiError('FORBIDDEN', 'Address not allowed');
     if (url.startsWith('/api/')) {
       reply.header('Cache-Control', 'no-store');
-      limit(ctx, `ip:${req.ip}`, DEFAULT_LIMITS.ipRate, DEFAULT_LIMITS.ipBurst);
+      limit(ctx, `ip:${req.ip}`, cfg.ipRate.perSec, cfg.ipRate.burst);
     }
   });
 

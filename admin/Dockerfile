@@ -17,6 +17,10 @@ RUN api="$(echo "$PUBLIC_API_URL" | sed -E 's#^(https?://[^/]+).*#\1#')"; \
     sed "s#__CONNECT_SRC__#$src#" /tmp/admin.conf > /tmp/default.conf
 
 FROM nginxinc/nginx-unprivileged:alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e
+# Pick up Alpine security fixes released after the pinned base image.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 COPY --from=build /tmp/default.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/admin/build /usr/share/nginx/html/admin
 EXPOSE 8080

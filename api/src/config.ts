@@ -45,6 +45,8 @@ const schema = z.object({
   ADMIN_ORIGIN: z.string().default(''),
   IP_ALLOWLIST: z.string().default(''),
   TRUST_PROXY_CIDRS: z.string().default(''),
+  IP_RATE_PER_SEC: z.coerce.number().min(1).default(50),
+  IP_RATE_BURST: z.coerce.number().int().min(1).default(300),
   MEMORY_LIMIT_MB: z.coerce.number().int().min(64).default(400),
   CLEANUP_INTERVAL_MS: z.coerce.number().int().min(1000).default(5 * 60 * 1000),
   RUN_MIGRATIONS: z
@@ -109,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     cors: { clientOrigins: csv(c.CORS_CLIENT_ORIGINS), adminOrigin: c.ADMIN_ORIGIN || undefined },
     ipAllowlist: csv(c.IP_ALLOWLIST),
     trustProxyCidrs: csv(c.TRUST_PROXY_CIDRS),
+    ipRate: { perSec: c.IP_RATE_PER_SEC, burst: c.IP_RATE_BURST },
     memoryLimitMb: c.MEMORY_LIMIT_MB,
     cleanupIntervalMs: c.CLEANUP_INTERVAL_MS,
     runMigrations: c.RUN_MIGRATIONS,

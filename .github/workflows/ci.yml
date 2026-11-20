@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: api/package-lock.json }
+      - run: npm ci
+      - name: Lint and typecheck
+        run: npm run lint
+      - name: Unit tests
+        run: npm run test:unit
+      - name: Integration and abuse tests (Testcontainers MySQL)
+        run: npm run test:integration
+      - run: npm run build
+
+  admin:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: admin } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: admin/package-lock.json }
+      - run: npm ci
+      - name: Svelte check (types + a11y, warnings fail) and API types match openapi.yaml
+        run: npm run lint
+      - run: npm run build
+
+  images:
+    runs-on: ubuntu-latest
+    needs: [api, admin]
+    env:
+      AUTH_JWT_SECRET: ci-stars-secret-ci-stars-secret-0123
+      STAFF_EMAIL_DOMAINS: setu.ie
+      TOKEN_SECRET: ci-token-secret-ci-token-secret-ci-token-secret
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker compose build
+      - name: Start the stack
+        run: docker compose up -d --wait --wait-timeout 180
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: admin/package-lock.json }
+      - name: Playwright smoke tests
+        working-directory: admin
+        env:
+          E2E_STARS_SECRET: ${{ env.AUTH_JWT_SECRET }}
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test --trace off
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Trivy scan (api)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: roomsink-api:local
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Trivy scan (admin)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: roomsink-admin:local
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Trivy config scan (Dockerfiles, compose)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+      - if: always()
+        run: docker compose down -v

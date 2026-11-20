@@ -114,7 +114,7 @@ components:
         maxEvents: { type: integer, maximum: 50000 }
         maxClients: { type: integer, maximum: 1000 }
         maxBytes: { type: integer, maximum: 20971520 }
-        writesPerSecond: { type: number, maximum: 100 }
+        writesPerSecond: { type: number, maximum: 1000, description: 'Default 100' }
         clientWritesPerSecond: { type: number }
         clientWriteBurst: { type: integer }
         joinsPerHour: { type: integer }

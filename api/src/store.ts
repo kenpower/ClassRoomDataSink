@@ -3,7 +3,7 @@ import type { ResultSetHeader } from 'mysql2/promise';
 import { tx, isDuplicateKey, type Db, type Conn, type Row } from './db.js';
 import { ApiError, roomNotFound } from './errors.js';
 import { pickWeighted, randomRoomCode } from './codes.js';
-import { resolveRoomLimits, type RoomLimits } from './ratelimit.js';
+import type { RoomLimits } from './ratelimit.js';
 import type { EventInput } from './validate.js';
 import type { LiveEvent } from './live.js';
 
@@ -127,6 +127,18 @@ class RoomCache {
     this.m.clear();
   }
 }
+
+interface PendingWrite {
+  room: RoomWithApps;
+  cid: string;
+  key: string;
+  events: (EventInput & { bytes: number })[];
+  limits: RoomLimits;
+  resolve: (r: WriteResult) => void;
+  reject: (e: unknown) => void;
+}
+
+type Outcome = { ok: true; result: WriteResult } | { ok: false; error: ApiError };
 
 export interface WriteResult {
   ids: string[];
@@ -269,10 +281,22 @@ export class Store {
       const room = rowToRoom(rows[0]);
       const sets: string[] = [];
       const vals: unknown[] = [];
-      if (patch.title !== undefined) sets.push('title = ?'), vals.push(patch.title);
-      if (patch.purpose !== undefined) sets.push('purpose = ?'), vals.push(patch.purpose);
-      if (patch.publicConfig !== undefined) sets.push('public_config = CAST(? AS JSON)'), vals.push(JSON.stringify(patch.publicConfig));
-      if (patch.limits !== undefined) sets.push('limits = CAST(? AS JSON)'), vals.push(JSON.stringify(patch.limits));
+      if (patch.title !== undefined) {
+        sets.push('title = ?');
+        vals.push(patch.title);
+      }
+      if (patch.purpose !== undefined) {
+        sets.push('purpose = ?');
+        vals.push(patch.purpose);
+      }
+      if (patch.publicConfig !== undefined) {
+        sets.push('public_config = CAST(? AS JSON)');
+        vals.push(JSON.stringify(patch.publicConfig));
+      }
+      if (patch.limits !== undefined) {
+        sets.push('limits = CAST(? AS JSON)');
+        vals.push(JSON.stringify(patch.limits));
+      }
       if (patch.closesAt !== undefined || patch.expiresAt !== undefined) {
         const closesAt = patch.closesAt ?? room.closesAt;
         const expiresAt = patch.expiresAt ?? room.expiresAt;
@@ -401,103 +425,171 @@ export class Store {
   }
 
   /**
-   * Store events atomically: lock the room row, check status and caps, allocate contiguous seqs from next_seq,
-   * batch-insert, bump counters and record the idempotency key — all in one transaction.
+   * Store events. Requests for the same room are coalesced: while one transaction commits, new requests queue,
+   * and the next transaction takes them all (group commit). Each transaction locks the room row
+   * (SELECT … FOR UPDATE), checks status and caps per request, allocates contiguous seqs from next_seq,
+   * batch-inserts, bumps counters and records idempotency keys. Every request gets its own result or error.
    */
-  async writeEvents(
+  writeEvents(
     room: RoomWithApps,
     cid: string,
     idemKey: string,
     events: (EventInput & { bytes: number })[],
     limits: RoomLimits,
   ): Promise<WriteResult> {
-    const attempt = () =>
-      tx(this.db, async (c) => {
-        await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED').catch(() => {});
-        const [rows] = await c.query<Row[]>(
-          'SELECT status, next_seq, event_count, bytes_used, closes_at FROM rooms WHERE code = ? AND expires_at > UTC_TIMESTAMP(3) FOR UPDATE',
-          [room.code],
-        );
-        const r = rows[0];
-        if (!r) throw roomNotFound();
-        // Idempotency check happens under the room lock so concurrent retries of the same key serialise.
-        const [dup] = await c.query<Row[]>(
-          `SELECT i.event_id, e.seq FROM idempotency i LEFT JOIN events e ON e.id = i.event_id
-           WHERE i.room = ? AND i.cid = ? AND i.\`key\` = ? AND i.created_at > UTC_TIMESTAMP(3) - INTERVAL 10 MINUTE`,
-          [room.code, cid, idemKey],
-        );
-        if (dup[0]) {
-          return { ids: [dup[0].event_id as string], seqs: dup[0].seq === null ? [] : [Number(dup[0].seq)], duplicate: true, live: [] };
-        }
-        if (r.status !== 'open' || (r.closes_at as Date).getTime() <= Date.now()) throw new ApiError('ROOM_CLOSED', 'Room is closed');
-        const [cl] = await c.query<Row[]>('SELECT `groups`, deleted FROM clients WHERE room = ? AND cid = ?', [room.code, cid]);
-        if (!cl[0]) throw new ApiError('TOKEN_INVALID', 'Unknown client');
-        if (cl[0].deleted) throw new ApiError('CLIENT_DELETED', 'This client deleted its data');
-        const groups = asJson<Record<string, string>>(cl[0].groups, {});
+    return new Promise((resolve, reject) => {
+      let q = this.writeQueues.get(room.code);
+      if (!q) this.writeQueues.set(room.code, (q = { items: [], running: false }));
+      q.items.push({ room, cid, key: idemKey, events, limits, resolve, reject });
+      if (!q.running) void this.drainWrites(room.code, q);
+    });
+  }
 
-        // Per client per app, then per room.
-        const perApp = new Map<string, number>();
-        for (const e of events) perApp.set(e.app, (perApp.get(e.app) ?? 0) + 1);
-        for (const [app, n] of perApp) {
-          const def = room.apps.find((a) => a.name === app)!;
-          const [cnt] = await c.query<Row[]>('SELECT COUNT(*) n FROM events WHERE room = ? AND cid = ? AND app = ?', [room.code, cid, app]);
-          if (Number(cnt[0]!.n) + n > def.maxEventsPerClient) throw new ApiError('CAP_REACHED', `Event limit reached for app ${app}`);
-        }
-        const bytes = events.reduce((s, e) => s + e.bytes, 0);
-        if (Number(r.event_count) + events.length > limits.maxEvents) throw new ApiError('CAP_REACHED', 'Room event limit reached');
-        if (Number(r.bytes_used) + bytes > limits.maxBytes) throw new ApiError('CAP_REACHED', 'Room storage limit reached');
+  private writeQueues = new Map<string, { items: PendingWrite[]; running: boolean }>();
 
-        const firstSeq = Number(r.next_seq);
-        const now = new Date();
-        const ids = events.map(() => ulid());
-        const seqs = events.map((_, i) => firstSeq + i);
-        const values: unknown[] = [];
-        events.forEach((e, i) => {
-          values.push(ids[i], room.code, seqs[i], e.app, cid, now, e.clientT ?? null, e.appVersion ?? null, JSON.stringify(e.data));
-        });
-        await c.query(
-          `INSERT INTO events (id, room, seq, app, cid, t, client_t, app_version, data) VALUES ${events
-            .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))')
-            .join(', ')}`,
-          values,
-        );
-        await c.query('UPDATE rooms SET next_seq = next_seq + ?, event_count = event_count + ?, bytes_used = bytes_used + ? WHERE code = ?', [
-          events.length,
-          events.length,
-          bytes,
-          room.code,
-        ]);
-        await c.query('INSERT INTO idempotency (room, cid, `key`, event_id, created_at) VALUES (?, ?, ?, ?, ?)', [room.code, cid, idemKey, ids[0], now]);
-        const live: LiveEvent[] = events.map((e, i) => ({
-          id: ids[i]!,
-          seq: seqs[i]!,
-          app: e.app,
-          cid,
-          group: groups[e.app] ?? null,
-          t: now.toISOString(),
-          clientT: e.clientT ?? null,
-          appVersion: e.appVersion ?? null,
-          data: e.data,
-        }));
-        return { ids, seqs, duplicate: false, live };
-      });
+  private async drainWrites(code: string, q: { items: PendingWrite[]; running: boolean }) {
+    q.running = true;
     try {
-      return await attempt();
-    } catch (err) {
-      // Same idempotency key raced in through a different path: report the original.
-      if (isDuplicateKey(err)) {
-        const d = await this.findIdempotent(room.code, cid, idemKey);
-        if (d) return { ids: [d.id], seqs: d.seq === null ? [] : [d.seq], duplicate: true, live: [] };
+      while (q.items.length) {
+        // Up to 100 requests (≤ 2,000 events) per transaction.
+        const batch = q.items.splice(0, 100);
+        let outcomes: Outcome[];
+        try {
+          outcomes = await tx(this.db, (c) => this.writeBatch(c, code, batch));
+        } catch (err) {
+          for (const item of batch) item.reject(err);
+          continue;
+        }
+        batch.forEach((item, i) => {
+          const o = outcomes[i]!;
+          if (o.ok) item.resolve(o.result);
+          else item.reject(o.error);
+        });
       }
-      throw err;
+    } finally {
+      q.running = false;
+      if (!q.items.length) this.writeQueues.delete(code);
+      else void this.drainWrites(code, q);
     }
+  }
+
+  private async writeBatch(c: Conn, code: string, batch: PendingWrite[]): Promise<Outcome[]> {
+    await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED').catch(() => {});
+    const [rows] = await c.query<Row[]>(
+      'SELECT status, next_seq, event_count, bytes_used, closes_at FROM rooms WHERE code = ? AND expires_at > UTC_TIMESTAMP(3) FOR UPDATE',
+      [code],
+    );
+    const r = rows[0];
+    if (!r) return batch.map(() => ({ ok: false, error: roomNotFound() }));
+    const open = r.status === 'open' && (r.closes_at as Date).getTime() > Date.now();
+
+    const cids = [...new Set(batch.map((b) => b.cid))];
+    // Idempotency keys already used (checked under the room lock, so retries of one key serialise).
+    const [dups] = await c.query<Row[]>(
+      `SELECT i.cid, i.\`key\`, i.event_id, e.seq FROM idempotency i LEFT JOIN events e ON e.id = i.event_id
+       WHERE i.room = ? AND (i.cid, i.\`key\`) IN (?) AND i.created_at > UTC_TIMESTAMP(3) - INTERVAL 10 MINUTE`,
+      [code, batch.map((b) => [b.cid, b.key])],
+    );
+    const seen = new Map<string, { id: string; seq: number | null }>();
+    for (const d of dups) seen.set(`${d.cid}|${d.key}`, { id: d.event_id, seq: d.seq === null ? null : Number(d.seq) });
+    const [clientRows] = await c.query<Row[]>('SELECT cid, `groups`, deleted FROM clients WHERE room = ? AND cid IN (?)', [code, cids]);
+    const clients = new Map(clientRows.map((x) => [x.cid as string, { groups: asJson<Record<string, string>>(x.groups, {}), deleted: !!x.deleted }]));
+    const [countRows] = await c.query<Row[]>('SELECT cid, app, COUNT(*) n FROM events WHERE room = ? AND cid IN (?) GROUP BY cid, app', [code, cids]);
+    const perClientApp = new Map(countRows.map((x) => [`${x.cid}|${x.app}`, Number(x.n)]));
+
+    let eventCount = Number(r.event_count);
+    let bytesUsed = Number(r.bytes_used);
+    let nextSeq = Number(r.next_seq);
+    const now = new Date();
+    const inserts: unknown[][] = [];
+    const idemRows: unknown[][] = [];
+    const outcomes: Outcome[] = [];
+    const fail = (error: ApiError) => outcomes.push({ ok: false, error });
+
+    for (const b of batch) {
+      const dupKey = `${b.cid}|${b.key}`;
+      const dup = seen.get(dupKey);
+      if (dup) {
+        outcomes.push({ ok: true, result: { ids: [dup.id], seqs: dup.seq === null ? [] : [dup.seq], duplicate: true, live: [] } });
+        continue;
+      }
+      if (!open) {
+        fail(new ApiError('ROOM_CLOSED', 'Room is closed'));
+        continue;
+      }
+      const client = clients.get(b.cid);
+      if (!client) {
+        fail(new ApiError('TOKEN_INVALID', 'Unknown client'));
+        continue;
+      }
+      if (client.deleted) {
+        fail(new ApiError('CLIENT_DELETED', 'This client deleted its data'));
+        continue;
+      }
+      // Per client per app, then per room.
+      const perApp = new Map<string, number>();
+      for (const e of b.events) perApp.set(e.app, (perApp.get(e.app) ?? 0) + 1);
+      let capError: ApiError | null = null;
+      for (const [app, n] of perApp) {
+        const def = b.room.apps.find((a) => a.name === app)!;
+        if ((perClientApp.get(`${b.cid}|${app}`) ?? 0) + n > def.maxEventsPerClient) capError = new ApiError('CAP_REACHED', `Event limit reached for app ${app}`);
+      }
+      const bytes = b.events.reduce((s, e) => s + e.bytes, 0);
+      if (!capError && eventCount + b.events.length > b.limits.maxEvents) capError = new ApiError('CAP_REACHED', 'Room event limit reached');
+      if (!capError && bytesUsed + bytes > b.limits.maxBytes) capError = new ApiError('CAP_REACHED', 'Room storage limit reached');
+      if (capError) {
+        fail(capError);
+        continue;
+      }
+
+      for (const [app, n] of perApp) perClientApp.set(`${b.cid}|${app}`, (perClientApp.get(`${b.cid}|${app}`) ?? 0) + n);
+      eventCount += b.events.length;
+      bytesUsed += bytes;
+      const ids = b.events.map(() => ulid());
+      const seqs = b.events.map(() => nextSeq++);
+      b.events.forEach((e, i) => {
+        inserts.push([ids[i], code, seqs[i], e.app, b.cid, now, e.clientT ?? null, e.appVersion ?? null, JSON.stringify(e.data)]);
+      });
+      idemRows.push([code, b.cid, b.key, ids[0], now]);
+      seen.set(dupKey, { id: ids[0]!, seq: seqs[0]! });
+      const live: LiveEvent[] = b.events.map((e, i) => ({
+        id: ids[i]!,
+        seq: seqs[i]!,
+        app: e.app,
+        cid: b.cid,
+        group: client.groups[e.app] ?? null,
+        t: now.toISOString(),
+        clientT: e.clientT ?? null,
+        appVersion: e.appVersion ?? null,
+        data: e.data,
+      }));
+      outcomes.push({ ok: true, result: { ids, seqs, duplicate: false, live } });
+    }
+
+    if (inserts.length) {
+      await c.query(
+        `INSERT INTO events (id, room, seq, app, cid, t, client_t, app_version, data) VALUES ${inserts
+          .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))')
+          .join(', ')}`,
+        inserts.flat(),
+      );
+      await c.query('UPDATE rooms SET next_seq = ?, event_count = ?, bytes_used = ? WHERE code = ?', [nextSeq, eventCount, bytesUsed, code]);
+      await c.query('INSERT INTO idempotency (room, cid, `key`, event_id, created_at) VALUES ?', [idemRows]);
+    }
+    return outcomes;
   }
 
   async listEvents(code: string, opts: { app?: string; since?: number; limit: number; cid?: string }): Promise<LiveEvent[]> {
     const where = ['e.room = ?', 'e.seq > ?'];
     const vals: unknown[] = [code, opts.since ?? 0];
-    if (opts.app) where.push('e.app = ?'), vals.push(opts.app);
-    if (opts.cid) where.push('e.cid = ?'), vals.push(opts.cid);
+    if (opts.app) {
+        where.push('e.app = ?');
+        vals.push(opts.app);
+      }
+    if (opts.cid) {
+        where.push('e.cid = ?');
+        vals.push(opts.cid);
+      }
     const [rows] = await this.db.query<Row[]>(
       `SELECT e.id, e.seq, e.app, e.cid, e.t, e.client_t, e.app_version, e.data, c.groups
        FROM events e LEFT JOIN clients c ON c.room = e.room AND c.cid = e.cid
@@ -510,7 +602,10 @@ export class Store {
   async summary(code: string, app?: string) {
     const vals: unknown[] = [code];
     let filter = '';
-    if (app) (filter = ' AND e.app = ?'), vals.push(app);
+    if (app) {
+      filter = ' AND e.app = ?';
+      vals.push(app);
+    }
     const [rows] = await this.db.query<Row[]>(
       `SELECT e.app, JSON_UNQUOTE(JSON_EXTRACT(c.groups, CONCAT('$."', e.app, '"'))) AS grp,
               COUNT(*) AS events, COUNT(DISTINCT e.cid) AS clients, MAX(e.seq) AS last_seq

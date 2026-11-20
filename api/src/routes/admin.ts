@@ -36,7 +36,7 @@ const limitsSchema = z
     maxEvents: z.number().int().min(1).max(DEFAULT_LIMITS.roomMaxEvents),
     maxClients: z.number().int().min(1).max(DEFAULT_LIMITS.roomMaxClients),
     maxBytes: z.number().int().min(1).max(DEFAULT_LIMITS.roomMaxBytes),
-    writesPerSecond: z.number().min(0.1).max(DEFAULT_LIMITS.roomWriteRate),
+    writesPerSecond: z.number().min(0.1).max(DEFAULT_LIMITS.globalWriteRate),
     clientWritesPerSecond: z.number().min(0.1).max(20),
     clientWriteBurst: z.number().int().min(1).max(200),
     joinsPerHour: z.number().int().min(1).max(5000),
