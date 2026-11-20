@@ -54,6 +54,7 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
         ? false
         : {
             level: cfg.logLevel,
+            formatters: { level: (label: string) => ({ level: label }) },
             // JSON on stdout; never log payloads, tokens or full IPs.
             serializers: {
               req: (r) => ({ method: r.method, url: String(r.url).split('?')[0] }),
@@ -96,6 +97,8 @@ export async function buildApp(cfg: AppConfig, opts: BuildOptions = {}): Promise
   const jsonParser = app.getDefaultJsonParser('error', 'error');
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
     req.rawSize = Buffer.byteLength(body as string);
+    // An empty body with a JSON content type (common for bodiless POSTs) is treated as no body.
+    if ((body as string).trim() === '') return done(null, undefined);
     jsonParser(req, body as string, done);
   });
 

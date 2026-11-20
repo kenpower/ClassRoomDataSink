@@ -8,3 +8,6 @@ secrets/
 coverage/
 test-results/
 playwright-report/
+
+# e2e artifacts
+admin/test-results/
